@@ -258,16 +258,39 @@ class DialogQA(Model):
         # encoded_
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
 
-        encoded_past_question, past_question_mask, encoded_past_answer, past_answer_mask = get_masked_past_qa_pairs(
-            encoded_question, question_mask, encoded_answer, answer_mask,
-            followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len
-        )
 
-        encoded_question = self._ctx_q_encoder(encoded_question,
-                                               encoded_past_question,
-                                               encoded_past_answer,
-                                               past_question_mask,
-                                               past_answer_mask)
+
+        if self._ctx_q_encoder.__class__.__name__ == 'BiAttContext_MultiTurn':
+            past_questions, past_answers, past_question_masks, past_answer_masks = [], [], [], []
+            for i in range(self._ctx_q_encoder.num_turns):
+                turn_ix = i + 1
+                past_question, past_question_mask, past_answer, past_answer_mask = get_masked_past_qa_pairs(
+                    encoded_question, question_mask, encoded_answer, answer_mask,
+                    followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len, turn_ix
+                )
+                past_questions.append(past_question)
+                past_answers.append(past_answer)
+                past_question_masks.append(past_question_mask)
+                past_answer_masks.append(past_answer_mask)
+
+
+            encoded_question = self._ctx_q_encoder(encoded_question,
+                                                   past_questions,
+                                                   past_answers,
+                                                   past_question_masks,
+                                                   past_answer_masks)
+        else:
+            past_question, past_question_mask, past_answer, past_answer_mask = get_masked_past_qa_pairs(
+                encoded_question, question_mask, encoded_answer, answer_mask,
+                followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len
+            )
+
+            encoded_question = self._ctx_q_encoder(question,
+                                                   past_question,
+                                                   past_answer,
+                                                   past_question_mask,
+                                                   past_answer_mask)
+
         # print('after', encoded_question.size())
 
         # Shape: (batch_size * max_qa_count, passage_length, question_length)

@@ -43,7 +43,7 @@
         "marker_embedding_dim": 10,
         "num_context_answers": 2,
         "ctx_q_encoder": {
-            "type": "biatt_ctx_single",
+            "type": "biatt_ctx_multi",
             "input_dim": 200,
             "qa_attention": {
                 "type": "linear",
@@ -57,6 +57,8 @@
                 "tensor_1_dim": 200,
                 "tensor_2_dim": 200
             },
+            "combination": "uniform",
+            "num_turns": 3
         },
         "phrase_layer": {
             "type": "gru",
