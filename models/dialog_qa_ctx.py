@@ -20,7 +20,7 @@ from allennlp.modules.input_variational_dropout import InputVariationalDropout
 from allennlp.nn import InitializerApplicator, util
 from allennlp.training.metrics import Average, BooleanAccuracy, CategoricalAccuracy
 
-from models.contextualized_question_encoder import ContextualizedQuestionEncoder
+from models.contextualized_question_encoder import ContextualizedQuestionEncoder, get_masked_past_qa_pairs
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -209,15 +209,9 @@ class DialogQA(Model):
 
         # Get QA masks here
         question_mask = util.get_text_field_mask(question, num_wrapping_dims=1).float()
-        past_question_mask = F.pad(question_mask, (0, 0, 1, 0, 0, 0))[:, :-1, :] \
-            .contiguous() \
-            .view(total_qa_count, max_q_len)
         question_mask = question_mask.reshape(total_qa_count, max_q_len)
 
         answer_mask = util.get_text_field_mask(answer, num_wrapping_dims=1).float()
-        past_answer_mask = F.pad(answer_mask, (0, 0, 1, 0, 0, 0))[:, :-1, :] \
-            .contiguous(). \
-            view(total_qa_count, max_a_len)
         answer_mask = answer_mask.reshape(total_qa_count, max_a_len)
 
 
@@ -261,28 +255,14 @@ class DialogQA(Model):
         """
 
         # pad to add an extra prepended question
-        emb_sz = self._phrase_layer.get_output_dim()
-        encoded_past_answer = encoded_answer.view(batch_size, max_qa_count, max_a_len, emb_sz)
-        encoded_past_answer = F.pad(encoded_past_answer, (0, 0, 0, 0, 1, 0, 0, 0))
-        encoded_past_answer = encoded_past_answer[:, :-1, :]  # remove the last one
-        followup_list_dialog_wise = followup_list.view(batch_size, max_qa_count, -1)
+        # encoded_
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
-        is_followup_mask = (followup_list_dialog_wise == followup_yes_label).float()
-        is_followup_mask = F.pad(is_followup_mask, (0, 0, 1, 0, 0, 0))[:, :-1, :]
-        # if its not a followup, set to zeros (don't do contextualisation)
-        encoded_past_answer = is_followup_mask.unsqueeze(2).expand_as(encoded_past_answer) * encoded_past_answer
-        encoded_past_answer = encoded_past_answer.view(total_qa_count, max_a_len, emb_sz)
 
-        # this is probably wrong
-        encoded_past_question = encoded_question.view(batch_size, max_qa_count, max_q_len, emb_sz)
-        encoded_past_question = F.pad(encoded_past_question, (0, 0, 0, 0, 1, 0, 0, 0))
-        encoded_past_question = encoded_past_question[:, :-1, :]
-        # zero out turns which were not a followup
-        encoded_past_question = is_followup_mask.unsqueeze(2).expand_as(
-            encoded_past_question) * encoded_past_question
-        encoded_past_question = encoded_past_question.view(total_qa_count, max_q_len, emb_sz)
+        encoded_past_question, past_question_mask, encoded_past_answer, past_answer_mask = get_masked_past_qa_pairs(
+            encoded_question, question_mask, encoded_answer, answer_mask,
+            followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len
+        )
 
-        # print('before', encoded_question.size())
         encoded_question = self._ctx_q_encoder(encoded_question,
                                                encoded_past_question,
                                                encoded_past_answer,

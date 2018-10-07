@@ -10,7 +10,10 @@ from typing import Optional
 class ContextualizedQuestionEncoder(_EncoderBase, Registrable):
     pass
 
-
+"""
+    To calculate whether a QA pair n turns ago was a followup:
+    - this pair was a followup AND the next pair was a followup
+"""
 
 def get_masked_past_qa_pairs(question,
                              question_mask,
@@ -25,16 +28,26 @@ def get_masked_past_qa_pairs(question,
                              n=1):
     emb_sz = question.size(-1)
 
+    question_mask = question_mask.view(batch_size, max_qa_count, max_q_len)
+    answer_mask = answer_mask.view(batch_size, max_qa_count, max_a_len)
+
     total_qa_count = batch_size * max_qa_count
     past_question_mask = F.pad(question_mask, (0, 0, n, 0, 0, 0))[:, :-n, :] \
         .contiguous() \
         .view(total_qa_count, max_q_len)
-    past_answer_mask = F.pad(answer_mask, (0, 0, n, 0, 0, 0))[:, :-n, :] \
-            .contiguous(). \
-            view(total_qa_count, max_a_len)
+    past_answer_mask = F.pad(answer_mask, (0, 0, n, 0, 0, 0))[:, :-n, :]\
+        .contiguous()\
+        .view(total_qa_count, max_a_len)
+
     followup_list_dialog_wise = followup_list.view(batch_size, max_qa_count, -1)
-    is_followup_mask = (followup_list_dialog_wise == followup_yes_label).float()
-    is_followup_mask = F.pad(is_followup_mask, (0, 0, 1, 0, 0, 0))[:, :-1, :]
+    followup_mask = (followup_list_dialog_wise == followup_yes_label).byte()
+    is_followup_mask = F.pad(followup_mask, (0, 0, 1, 0, 0, 0), value=True)[:, :-1, :]
+    for i in range(n - 1):
+        # this says that this turn said "SHOULD FOLLOW UP"
+        is_followup_mask_ = F.pad(followup_mask, (0, 0, 2 + i, 0, 0, 0), value=True)[:, :2 + i, :]
+        # this encodes the recurrence to encode a continuous sequence of followups
+        is_followup_mask = is_followup_mask & is_followup_mask_  # has to be contiguous
+    is_followup_mask = is_followup_mask.float()
 
     past_answer = answer.view(batch_size, max_qa_count, max_a_len, emb_sz)
     past_answer = F.pad(past_answer, (0, 0, 0, 0, n, 0, 0, 0))
