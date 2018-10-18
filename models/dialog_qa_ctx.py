@@ -258,8 +258,6 @@ class DialogQA(Model):
         # encoded_
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
 
-
-
         if self._ctx_q_encoder.__class__.__name__ == 'BiAttContext_MultiTurn':
             past_questions, past_answers, past_question_masks, past_answer_masks = [], [], [], []
             for i in range(self._ctx_q_encoder.num_turns):
@@ -285,7 +283,7 @@ class DialogQA(Model):
                 followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len
             )
 
-            encoded_question = self._ctx_q_encoder(question,
+            encoded_question = self._ctx_q_encoder(encoded_question,
                                                    past_question,
                                                    past_answer,
                                                    past_question_mask,

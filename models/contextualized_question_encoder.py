@@ -6,7 +6,6 @@ from allennlp.modules.matrix_attention import MatrixAttention
 from allennlp.nn import util
 from allennlp.modules import TimeDistributed
 import numpy as np
-from typing import Optional
 
 class ContextualizedQuestionEncoder(_EncoderBase, Registrable):
     pass
@@ -66,7 +65,7 @@ def get_masked_past_qa_pairs(question,
 
     return past_question, past_question_mask, past_answer, past_answer_mask
 
-def get_weights_per_turn(method, batch_size, qa_len, num_turn):
+def get_weights_per_turn(method, batch_size, qa_len, num_turn, entropy=None):
     if method == 'uniform':
         weights = torch.ones(batch_size, num_turn, 1, 1) / num_turn
         return weights
@@ -79,7 +78,12 @@ def get_weights_per_turn(method, batch_size, qa_len, num_turn):
         weights = torch.from_numpy(weight_np)
         weights = weights.view(batch_size * qa_len, num_turn, 1, 1)
         return weights
-
+    elif method == 'entropy':
+        assert entropy is not None
+        neg_entropy = - entropy
+        weights = F.softmax(neg_entropy, 1)  # softmax across turns
+        # remember entropy weighting is at the word level!
+        return weights.view(batch_size * qa_len, num_turn, qa_len, 1)
 
 def bidaf(q: torch.Tensor,
           c: torch.Tensor,
@@ -92,13 +96,17 @@ def bidaf(q: torch.Tensor,
     :param c: batch of contexts (B, N)
     :masks c: batch of masks (B, N)
     :param att: attention layer
-    :return: q_hat - context aware query representation
+    :return: tuple of
+        q_hat - context aware query representation
+        entropy - entropy of attention scores
     """
     # (B, N, M)
     q_c_att = att(q, c) # (B, M, N)
     sm_att = util.masked_softmax(q_c_att, masks) # (B, M, N)
+    log_sm_att = util.masked_log_softmax(q_c_att, masks) # (B, M, N)
+    entropy = torch.sum(- sm_att * log_sm_att, 2) # (B, M)
     q_hat = util.weighted_sum(c, sm_att) # (B, M)
-    return q_hat
+    return q_hat, entropy
 
 class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
     def __init__(self,
@@ -121,21 +129,15 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                 past_q_masks,
                 past_ans_masks,
                 curr_q_mask=None):
-        qq_hats, qa_hats, entropies = [], [], []
+        qq_hats, qa_hats, qq_entropies, qa_entropies = [], [], [], []
         i = 1
         for past_question, past_q_mask, past_answer, past_ans_mask in zip(past_questions, past_q_masks, past_answers, past_ans_masks):
-            print('ENCODING TURN {}'.format(i))
-            print(curr_question.size())
-            print(past_question.size())
-            print(past_answer.size())
-            print(past_q_mask.size())
-            print(past_ans_mask.size())
-            qq_hat = bidaf(curr_question, past_question, past_q_mask, self.qq_attention)
-            qa_hat = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention)
-            print('qq_hat', qq_hat.size())
-            print('qa_hat', qa_hat.size())
+            qq_hat, qq_entropy = bidaf(curr_question, past_question, past_q_mask, self.qq_attention)
+            qa_hat, qa_entropy = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention)
             qq_hats.append(qq_hat.unsqueeze(1))
             qa_hats.append(qa_hat.unsqueeze(1))
+            qq_entropies.append(qq_entropy.unsqueeze(1))
+            qa_entropies.append(qa_entropy.unsqueeze(1))
             i += 1
 
         # each qq_hat, qa_hat -> (B, N_QA, 1, M, EMB_SZ)
@@ -143,25 +145,30 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         # we need to get weights of size (B, N_QA, N_TURN)
         # multiply , sum along dim=2
 
-
-        import pdb
-        pdb.set_trace()
-
         qq_hat_multiturn = torch.cat(qq_hats, dim=1)
         qa_hat_multiturn = torch.cat(qa_hats, dim=1)
-        weights = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1), self.num_turns)
+        qq_entropy_multiturn = torch.cat(qq_entropies, dim=1)
+        qa_entropy_multiturn = torch.cat(qa_entropies, dim=1)
 
+        if self.combination == 'entropy':
+            weights_qq = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
+                                              self.num_turns, qq_entropy_multiturn)
+            weights_qa = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
+                                              self.num_turns, qa_entropy_multiturn)
+        else:
+            weights = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
+                                           self.num_turns)
+            weights_qq = weights
+            weights_qa = weights
         if qq_hat_multiturn.is_cuda:
-            weights = weights.cuda()
-        qq_hat_multiturn_weighted = weights * qq_hat_multiturn
-        qa_hat_multiturn_weighted = weights * qa_hat_multiturn
+            weights_qq = weights_qq.cuda()
+            weights_qa = weights_qa.cuda()
+
+        qq_hat_multiturn_weighted = weights_qq * qq_hat_multiturn
+        qa_hat_multiturn_weighted = weights_qa * qa_hat_multiturn
 
         qq_hat = torch.sum(qq_hat_multiturn_weighted, 1)
         qa_hat = torch.sum(qa_hat_multiturn_weighted, 1)
-        import pdb
-        pdb.set_trace()
-        print(qq_hat.size())
-        print(qq_hat.size())
 
         q_final = torch.cat([curr_question, qq_hat, qa_hat], dim=2)
         q_final_enc = self.q_hat_enc(q_final)
@@ -183,8 +190,8 @@ class BiAttContext_SingleTurn(ContextualizedQuestionEncoder):
                 past_q_mask,
                 past_ans_mask,
                 curr_q_mask=None):
-        qq_hat = bidaf(curr_question, past_question, past_q_mask, self.qq_attention)
-        qa_hat = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention)
+        qq_hat, _ = bidaf(curr_question, past_question, past_q_mask, self.qq_attention)
+        qa_hat, _ = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention)
         q_final = torch.cat([curr_question, qq_hat, qa_hat], dim=2)
         q_final_enc = self.q_hat_enc(q_final)
         return q_final_enc
