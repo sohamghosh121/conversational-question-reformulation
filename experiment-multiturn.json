@@ -57,8 +57,10 @@
                 "tensor_1_dim": 200,
                 "tensor_2_dim": 200
             },
-            "combination": "uniform",
-            "num_turns": 3
+            "combination": "entropy",
+            "num_turns": 3,
+            "use_antecedent_score": true,
+            "use_mention_score": true
         },
         "phrase_layer": {
             "type": "gru",

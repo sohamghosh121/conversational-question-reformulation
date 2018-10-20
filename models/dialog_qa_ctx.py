@@ -220,8 +220,6 @@ class DialogQA(Model):
         embedded_passage = self._variational_dropout(self._text_field_embedder(passage))
         passage_length = embedded_passage.size(1)
 
-
-
         passage_mask = util.get_text_field_mask(passage).float()
 
         repeated_passage_mask = passage_mask.unsqueeze(1).repeat(1, max_qa_count, 1)
@@ -249,7 +247,7 @@ class DialogQA(Model):
             three cases:
             1. is a followup
             2. is not a followup
-            3. is the first question
+            3. is the first (or k - 1) question
 
             in case 2, 3 - use zeros
         """
@@ -259,10 +257,10 @@ class DialogQA(Model):
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
 
         if self._ctx_q_encoder.__class__.__name__ == 'BiAttContext_MultiTurn':
-            past_questions, past_answers, past_question_masks, past_answer_masks = [], [], [], []
+            past_questions, past_answers, past_question_masks, past_answer_masks, followup_masks = [], [], [], [], []
             for i in range(self._ctx_q_encoder.num_turns):
                 turn_ix = i + 1
-                past_question, past_question_mask, past_answer, past_answer_mask = get_masked_past_qa_pairs(
+                past_question, past_question_mask, past_answer, past_answer_mask, followup_mask = get_masked_past_qa_pairs(
                     encoded_question, question_mask, encoded_answer, answer_mask,
                     followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len, turn_ix
                 )
@@ -270,15 +268,16 @@ class DialogQA(Model):
                 past_answers.append(past_answer)
                 past_question_masks.append(past_question_mask)
                 past_answer_masks.append(past_answer_mask)
-
+                followup_masks.append(followup_mask)
 
             encoded_question = self._ctx_q_encoder(encoded_question,
                                                    past_questions,
                                                    past_answers,
                                                    past_question_masks,
-                                                   past_answer_masks)
+                                                   past_answer_masks,
+                                                   followup_masks)
         else:
-            past_question, past_question_mask, past_answer, past_answer_mask = get_masked_past_qa_pairs(
+            past_question, past_question_mask, past_answer, past_answer_mask, _ = get_masked_past_qa_pairs(
                 encoded_question, question_mask, encoded_answer, answer_mask,
                 followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len
             )
