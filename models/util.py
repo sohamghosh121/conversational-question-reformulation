@@ -335,9 +335,9 @@ def make_reading_comprehension_instance_quac(question_list_tokens: List[List[Tok
                                                                 label_namespace="answer_tags"))
         fields['span_start'] = ListField(span_start_list)
         fields['span_end'] = ListField(span_end_list)
-        # if num_context_answers > 0:
-        #     for i in range(1, num_context_answers + 1):
-        #         fields['p_answer_marker'] = ListField(p_answer_marker_list)
+        if num_context_answers > 0:
+            for i in range(1, num_context_answers + 1):
+                fields['p_answer_marker'] = ListField(p_answer_marker_list)
         fields['yesno_list'] = ListField(
             [LabelField(yesno, label_namespace="yesno_labels") for yesno in yesno_list])
         fields['followup_list'] = ListField([LabelField(followup, label_namespace="followup_labels") \

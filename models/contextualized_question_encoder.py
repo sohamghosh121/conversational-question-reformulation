@@ -3,10 +3,13 @@ import torch.nn.functional as F
 from allennlp.modules.encoder_base import _EncoderBase
 from allennlp.common import Registrable
 from allennlp.modules.matrix_attention import MatrixAttention
+from allennlp.modules.seq2seq_encoders import Seq2SeqEncoder
 from allennlp.nn import util
 from allennlp.modules import TimeDistributed
 import numpy as np
 from torch.autograd import Variable
+
+from allennlp.modules.seq2seq_encoders import StackedBidirectionalLstm
 
 class ContextualizedQuestionEncoder(_EncoderBase, Registrable):
     pass
@@ -72,30 +75,31 @@ def get_masked_past_qa_pairs(question,
 
 def get_weights_per_turn(method, batch_size, qa_len, num_turn, entropy=None, turn_mask=None):
     if method == 'uniform':
-        weights = torch.ones(batch_size, num_turn, 1, 1) / num_turn
+        weights = torch.ones(batch_size, num_turn, qa_len, 1) / num_turn
         return Variable(weights)
     elif method == 'exponential':
         # for us qa pairs are appended in increasing number of turns away from
         # curr question!
         turn = np.arange(num_turn, 0, -1)
         weight = np.exp(turn) / np.sum(np.exp(turn))
-        weight_np = np.tile(weight[None, None, :], (batch_size, qa_len, 1))
-        weights = torch.from_numpy(weight_np)
-        weights = weights.view(batch_size * qa_len, num_turn, 1, 1)
+        weight_np = np.tile(weight[None, :, None], (batch_size, 1, qa_len))
+        weights = torch.from_numpy(weight_np.astype(np.float32))
+        weights = weights.unsqueeze(-1)
         return weights
     elif method == 'entropy':
         assert entropy is not None
         neg_entropy = - entropy
         turn_mask = turn_mask[:, :, None].expand_as(entropy)
-        weights = util.masked_softmax(neg_entropy, turn_mask)  # softmax across turns
+        weights = util.masked_softmax(neg_entropy, turn_mask, 1)  # softmax across turns
         # remember entropy weighting is at the word level!
-        return Variable(weights.view(batch_size * qa_len, num_turn, qa_len, 1))
+        return Variable(weights.view(batch_size, num_turn, qa_len, 1))
 
-def bidaf(q: torch.Tensor,
-          c: torch.Tensor,
+def bidaf(curr_q: torch.Tensor,
+          past_ctx_enc: torch.Tensor,
+          past_ctx_emb: torch.Tensor,
           masks: torch.Tensor,
           att: MatrixAttention,
-          mention_scorer
+          ant_scorer
           ):
     """
 
@@ -109,24 +113,25 @@ def bidaf(q: torch.Tensor,
     """
     # (B, N, M)
 
-    q_c_att = att(q, c) # (B, M, N)
-    if mention_scorer is not None:
-        mention_scores = mention_scorer(c)  # (B, N)
-        mention_scores_ex = mention_scores.squeeze(-1).unsqueeze(1).expand_as(q_c_att)
-        q_c_att = q_c_att + mention_scores_ex
-    sm_att = util.masked_softmax(q_c_att, masks) # (B, M, N)
+    q_c_att = att(curr_q, past_ctx_enc) # (B, M, N)
+    if ant_scorer is not None:
+        ant_scores = ant_scorer(past_ctx_enc)  # (B, N)
+        ant_scores_ex = ant_scores.squeeze(-1).unsqueeze(1).expand_as(q_c_att)
+        q_c_att = q_c_att + ant_scores_ex
+    sm_att = util.masked_softmax(q_c_att, masks)  # (B, M, N)
     log_sm_att = util.masked_log_softmax(q_c_att, masks) # (B, M, N)
-    entropy = torch.sum(- sm_att * log_sm_att, 2) # (B, M)
-    q_hat = util.weighted_sum(c, sm_att) # (B, M)
-    return q_hat, entropy
+    entropy = torch.sum(- sm_att * log_sm_att, 2)  # (B, M)
+    # print(past_ctx_emb.size(), sm_att.size())
+    q_hat = util.weighted_sum(past_ctx_emb, sm_att)  # (B, M)
+    return q_hat, entropy, sm_att
 
 class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
     def __init__(self,
                  num_turns: int,
                  combination: str,
-                 input_dim: int,
                  qq_attention: MatrixAttention,
                  qa_attention: MatrixAttention,
+                 coref_layer: Seq2SeqEncoder,
                  use_mention_score=False,
                  use_antecedent_score=False):
         super(BiAttContext_MultiTurn, self).__init__()
@@ -134,23 +139,30 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         self.combination = combination
         self.qq_attention = qq_attention
         self.qa_attention = qa_attention
+        self._coref_layer = coref_layer
+
+        coref_output_dim = self._coref_layer.get_output_dim()
+        coref_input_dim = self._coref_layer.get_input_dim()
 
         if use_mention_score:
-            self.mention_score = TimeDistributed(torch.nn.Linear(input_dim, 1))
+            self.mention_score = TimeDistributed(torch.nn.Linear(coref_output_dim, 1))
         else:
             self.mention_score = None
 
 
         if use_antecedent_score:
             self.antecedent_score = TimeDistributed(torch.nn.Sequential(
-                torch.nn.Linear(input_dim, 1), torch.nn.Sigmoid()))
+                torch.nn.Linear(coref_output_dim, 1), torch.nn.Sigmoid()))
         else:
             self.antecedent_score = None
 
-        if self.combination in ['entropy+exponential', 'exponential+entropy']:
-            self.entropy_combination_weight = Variable(0, requires_grad=True)
+        if self.combination == 'entropy+exponential':
+            if torch.cuda.is_available():
+                self.entropy_combination_weight = torch.nn.Parameter(torch.cuda.FloatTensor(1), requires_grad=True)
+            else:
+                self.entropy_combination_weight = torch.nn.Parameter(torch.FloatTensor(1), requires_grad=True)
 
-        self.q_hat_enc = TimeDistributed(torch.nn.Linear(input_dim * 3, input_dim))
+        self.q_hat_enc = TimeDistributed(torch.nn.Linear(coref_input_dim * 3, coref_input_dim))
 
     # These are now lists -> past_questions, past_answers, ....
     def forward(self, curr_question,
@@ -159,17 +171,35 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                 past_q_masks,
                 past_ans_masks,
                 qa_masks,
-                curr_q_mask=None):
-
-        qq_hats, qa_hats, qq_entropies, qa_entropies = [], [], [], []
+                curr_q_mask):
+        qq_hats, qa_hats, qq_entropies, qa_entropies, sm_att_as, sm_att_qs = [], [], [], [], [], []
         i = 1
+
+        curr_question_enc = self._coref_layer(curr_question, curr_q_mask)
+
         for past_question, past_q_mask, past_answer, past_ans_mask in zip(past_questions, past_q_masks, past_answers, past_ans_masks):
-            qq_hat, qq_entropy = bidaf(curr_question, past_question, past_q_mask, self.qq_attention, self.mention_score)
-            qa_hat, qa_entropy = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention, self.mention_score)
+            past_question_enc = self._coref_layer(past_question, past_q_mask)
+            past_answer_enc = self._coref_layer(past_answer, past_ans_mask)
+
+            qq_hat, qq_entropy, sm_att_q = bidaf(curr_question_enc,
+                                                 past_question_enc,
+                                                 past_question,
+                                                 past_q_mask,
+                                                 self.qq_attention,
+                                                 self.antecedent_score)
+            qa_hat, qa_entropy, sm_att_a = bidaf(curr_question_enc,
+                                                 past_answer_enc,
+                                                 past_answer,
+                                                 past_ans_mask,
+                                                 self.qa_attention,
+                                                 self.antecedent_score)
+
             qq_hats.append(qq_hat.unsqueeze(1))
             qa_hats.append(qa_hat.unsqueeze(1))
             qq_entropies.append(qq_entropy.unsqueeze(1))
             qa_entropies.append(qa_entropy.unsqueeze(1))
+            sm_att_qs.append(sm_att_q)
+            sm_att_as.append(sm_att_a)
             i += 1
 
         # each qq_hat, qa_hat -> (B, N_QA, 1, M, EMB_SZ)
@@ -184,7 +214,6 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
 
         turn_mask = torch.cat([qa_mask for qa_mask in qa_masks], dim=1)
 
-
         if self.combination == 'entropy':
             weights_qq = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
                                               self.num_turns, qq_entropy_multiturn, turn_mask)
@@ -193,13 +222,14 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         elif self.combination == 'entropy+exponential':
             weights_exp = get_weights_per_turn('exponential', curr_question.size(0), curr_question.size(1),
                                            self.num_turns)
-            weights_qq = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
+            weights_qq = get_weights_per_turn('entropy', curr_question.size(0), curr_question.size(1),
                                               self.num_turns, qq_entropy_multiturn, turn_mask)
-            weights_qa = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
+            weights_qa = get_weights_per_turn('entropy', curr_question.size(0), curr_question.size(1),
                                               self.num_turns, qa_entropy_multiturn, turn_mask)
-            w_entropy = F.sigmoid(self.entropy_combination_weight)  # [0, 1] weighting
+            w_entropy = torch.sigmoid(self.entropy_combination_weight)  # [0, 1] weighting
+
             weights_qa = w_entropy * weights_qa + (1 - w_entropy) * weights_exp
-            weights_qq = weights_qq + weights_exp
+            weights_qq = w_entropy * weights_qq + (1 - w_entropy) * weights_exp
         else:
             weights = get_weights_per_turn(self.combination, curr_question.size(0), curr_question.size(1),
                                            self.num_turns)
@@ -208,7 +238,6 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         if qq_hat_multiturn.is_cuda:
             weights_qq = weights_qq.cuda()
             weights_qa = weights_qa.cuda()
-
         qq_hat_multiturn_weighted = weights_qq * qq_hat_multiturn
         qa_hat_multiturn_weighted = weights_qa * qa_hat_multiturn
 
@@ -219,50 +248,10 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         q_final_enc = self.q_hat_enc(q_final)
 
         if self.antecedent_score is not None:
-            a_score = self.antecedent_score(curr_question)
+            a_score = self.antecedent_score(curr_question_enc)
             a_score = a_score.expand_as(q_final_enc)  # (B, 1)
             q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
 
-        return q_final_enc
+        return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as
 
-class BiAttContext_SingleTurn(ContextualizedQuestionEncoder):
-    def __init__(self,
-                 input_dim: int,
-                 qq_attention: MatrixAttention,
-                 qa_attention: MatrixAttention,
-                 use_mention_score=False,
-                 use_antecedent_score=False):
-        super(BiAttContext_SingleTurn, self).__init__()
-        self.qq_attention = qq_attention
-        self.qa_attention = qa_attention
-        self.q_hat_enc = TimeDistributed(torch.nn.Linear(input_dim * 3, input_dim))
-        if use_mention_score:
-            self.mention_score = TimeDistributed(torch.nn.Linear(input_dim, 1))
-        else:
-            self.mention_score = None
-
-        if use_antecedent_score:
-            self.antecedent_score = TimeDistributed(torch.nn.Sequential(
-                torch.nn.Linear(input_dim, 1), torch.nn.Sigmoid()))
-        else:
-            self.antecedent_score = None
-
-    def forward(self, curr_question,
-                past_question,
-                past_answer,
-                past_q_mask,
-                past_ans_mask,
-                curr_q_mask=None):
-        qq_hat, _ = bidaf(curr_question, past_question, past_q_mask, self.qq_attention)
-        qa_hat, _ = bidaf(curr_question, past_answer, past_ans_mask, self.qa_attention)
-        q_final = torch.cat([curr_question, qq_hat, qa_hat], dim=2)
-        q_final_enc = self.q_hat_enc(q_final)
-
-        if self.antecedent_score is not None:
-            a_score = self.antecedent_score(curr_question)
-            a_score = a_score.expand_as(q_final_enc)
-            q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
-        return q_final_enc
-
-ContextualizedQuestionEncoder.register('biatt_ctx_single')(BiAttContext_SingleTurn)
 ContextualizedQuestionEncoder.register('biatt_ctx_multi')(BiAttContext_MultiTurn)

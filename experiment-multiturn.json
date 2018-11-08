@@ -44,7 +44,13 @@
         "num_context_answers": 2,
         "ctx_q_encoder": {
             "type": "biatt_ctx_multi",
-            "input_dim": 200,
+              "coref_layer": {
+                "type": "gru",
+                "bidirectional": true,
+                "hidden_size": 100,
+                "input_size": 1124,
+                "num_layers": 1
+            },
             "qa_attention": {
                 "type": "linear",
                 "combination": "x,y,x*y",
@@ -57,7 +63,7 @@
                 "tensor_1_dim": 200,
                 "tensor_2_dim": 200
             },
-            "combination": "entropy",
+            "combination": "entropy+exponential",
             "num_turns": 3,
             "use_antecedent_score": true,
             "use_mention_score": true
@@ -66,7 +72,7 @@
             "type": "gru",
             "bidirectional": true,
             "hidden_size": 100,
-            "input_size": 1124,
+            "input_size": 1134,
             "num_layers": 1
         },
         "residual_encoder": {
@@ -116,8 +122,8 @@
             }
         }
     },
-    "train_data_path": "https://s3.amazonaws.com/my89public/quac/val.json",
-    "validation_data_path": "https://s3.amazonaws.com/my89public/quac/val.json",
+    "train_data_path": "data/val-small.json",
+    "validation_data_path": "data/val-small.json",
     "trainer": {
         "cuda_device": -1,
         "learning_rate_scheduler": {
