@@ -20,8 +20,10 @@ class ContextualizedQuestionEncoder(_EncoderBase, Registrable):
 """
 
 def get_masked_past_qa_pairs(question,
+                             question_pos,
                              question_mask,
                              answer,
+                             answer_pos,
                              answer_mask,
                              followup_list,
                              followup_yes_label,
@@ -31,6 +33,7 @@ def get_masked_past_qa_pairs(question,
                              max_a_len,
                              n=1):
     emb_sz = question.size(-1)
+    pos_emb_sz = question_pos.size(-1)
 
     question_mask = question_mask.view(batch_size, max_qa_count, max_q_len)
     answer_mask = answer_mask.view(batch_size, max_qa_count, max_a_len)
@@ -61,6 +64,13 @@ def get_masked_past_qa_pairs(question,
     past_answer = is_followup_mask.unsqueeze(2).expand_as(past_answer) * past_answer
     past_answer = past_answer.view(total_qa_count, max_a_len, emb_sz)
 
+    past_answer_pos = answer_pos.view(batch_size, max_qa_count, max_a_len, pos_emb_sz)
+    past_answer_pos = F.pad(past_answer_pos, (0, 0, 0, 0, n, 0, 0, 0))
+    past_answer_pos = past_answer_pos[:, :-n, :]  # remove the last one
+    past_answer_pos = is_followup_mask.unsqueeze(2).expand_as(past_answer_pos) * past_answer_pos
+    past_answer_pos = past_answer_pos.view(total_qa_count, max_a_len, pos_emb_sz)
+
+
     past_question = question.view(batch_size, max_qa_count, max_q_len, emb_sz)
     past_question = F.pad(past_question, (0, 0, 0, 0, n, 0, 0, 0))
     past_question = past_question[:, :-n, :]
@@ -69,9 +79,19 @@ def get_masked_past_qa_pairs(question,
         past_question) * past_question
     past_question = past_question.view(total_qa_count, max_q_len, emb_sz)
 
+    past_question_pos = question_pos.view(batch_size, max_qa_count, max_q_len, pos_emb_sz)
+    past_question_pos = F.pad(past_question_pos, (0, 0, 0, 0, n, 0, 0, 0))
+    past_question_pos = past_question_pos[:, :-n, :]
+    # zero out turns which were not a followup
+    past_question_pos = is_followup_mask.unsqueeze(2).expand_as(
+        past_question_pos) * past_question_pos
+    past_question_pos = past_question_pos.view(total_qa_count, max_q_len, pos_emb_sz)
+
+
     is_followup_mask = is_followup_mask.view(is_followup_mask.size(0) * is_followup_mask.size(1), 1)
 
-    return past_question, past_question_mask, past_answer, past_answer_mask, is_followup_mask
+    return past_question, past_question_pos, past_question_mask, past_answer, past_answer_pos, past_answer_mask, \
+           is_followup_mask
 
 def get_weights_per_turn(method, batch_size, qa_len, num_turn, entropy=None, turn_mask=None):
     if method == 'uniform':
@@ -112,8 +132,9 @@ def bidaf(curr_q: torch.Tensor,
         entropy - entropy of attention scores
     """
     # (B, N, M)
-
-    q_c_att = att(curr_q, past_ctx_enc) # (B, M, N)
+    import pdb
+    pdb.set_trace()
+    q_c_att = att(curr_q, past_ctx_enc)  # (B, M, N)
     if ant_scorer is not None:
         ant_scores = ant_scorer(past_ctx_enc)  # (B, N)
         ant_scores_ex = ant_scores.squeeze(-1).unsqueeze(1).expand_as(q_c_att)
@@ -132,6 +153,8 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                  qq_attention: MatrixAttention,
                  qa_attention: MatrixAttention,
                  coref_layer: Seq2SeqEncoder,
+                 use_ling: bool = False,
+                 ling_features_size: int = 0,
                  use_mention_score=False,
                  use_antecedent_score=False):
         super(BiAttContext_MultiTurn, self).__init__()
@@ -140,9 +163,12 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         self.qq_attention = qq_attention
         self.qa_attention = qa_attention
         self._coref_layer = coref_layer
-
+        self.use_ling = True
         coref_output_dim = self._coref_layer.get_output_dim()
         coref_input_dim = self._coref_layer.get_input_dim()
+        self.use_ling = use_ling
+        if self.use_ling:
+            self._coref_proj = TimeDistributed(torch.nn.Linear(coref_output_dim + ling_features_size, coref_output_dim))
 
         if use_mention_score:
             self.mention_score = TimeDistributed(torch.nn.Linear(coref_output_dim, 1))
@@ -166,8 +192,11 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
 
     # These are now lists -> past_questions, past_answers, ....
     def forward(self, curr_question,
+                curr_question_pos,
                 past_questions,
+                past_questions_pos,
                 past_answers,
+                past_answers_pos,
                 past_q_masks,
                 past_ans_masks,
                 qa_masks,
@@ -177,22 +206,32 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
 
         curr_question_enc = self._coref_layer(curr_question, curr_q_mask)
 
-        for past_question, past_q_mask, past_answer, past_ans_mask in zip(past_questions, past_q_masks, past_answers, past_ans_masks):
+        if self.use_ling:
+            curr_question_enc = self._coref_proj(torch.cat([curr_question_enc, curr_question_pos], -1))
+
+        for past_question, past_question_pos, past_q_mask, \
+            past_answer, past_answer_pos, past_ans_mask \
+                in zip(past_questions, past_questions_pos, past_q_masks,
+                       past_answers, past_answers_pos, past_ans_masks):
             past_question_enc = self._coref_layer(past_question, past_q_mask)
             past_answer_enc = self._coref_layer(past_answer, past_ans_mask)
+
+            if self.use_ling:
+                past_question_enc = self._coref_proj(torch.cat([past_question_enc, past_question_pos], -1))
+                past_answer_enc = self._coref_proj(torch.cat([past_answer_enc, past_answer_pos], -1))
 
             qq_hat, qq_entropy, sm_att_q = bidaf(curr_question_enc,
                                                  past_question_enc,
                                                  past_question,
                                                  past_q_mask,
                                                  self.qq_attention,
-                                                 self.antecedent_score)
+                                                 self.mention_score)
             qa_hat, qa_entropy, sm_att_a = bidaf(curr_question_enc,
                                                  past_answer_enc,
                                                  past_answer,
                                                  past_ans_mask,
                                                  self.qa_attention,
-                                                 self.antecedent_score)
+                                                 self.mention_score)
 
             qq_hats.append(qq_hat.unsqueeze(1))
             qa_hats.append(qa_hat.unsqueeze(1))
@@ -251,7 +290,9 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
             a_score = self.antecedent_score(curr_question_enc)
             a_score = a_score.expand_as(q_final_enc)  # (B, 1)
             q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
+        else:
+            a_score = None
 
-        return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as
+        return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as, a_score
 
 ContextualizedQuestionEncoder.register('biatt_ctx_multi')(BiAttContext_MultiTurn)

@@ -67,12 +67,19 @@ class QuACReader(DatasetReader):
         for article in dataset:
             for paragraph_json in article['paragraphs']:
                 paragraph = paragraph_json["context"]
+                paragraph_pos = paragraph_json['context_pos']
+
                 tokenized_paragraph = self._tokenizer.tokenize(paragraph)
                 qas = paragraph_json['qas']
                 metadata = {}
                 metadata["instance_id"] = [qa['id'] for qa in qas]
                 question_text_list = [qa["question"].strip().replace("\n", "") for qa in qas]
+                question_pos_list = [qa["question_pos"] for qa in qas]
+
                 answer_texts_list = [[answer['text'] for answer in qa['answers']] for qa in qas]
+                answer_pos_list = [[paragraph_pos[a['answer_start']:a['answer_start']+len(a['text'])]
+                                    for a in qa['answers']] for qa in qas]
+
                 metadata["question"] = question_text_list
                 metadata['answer_texts_list'] = answer_texts_list
                 span_starts_list = [[answer['answer_start'] for answer in qa['answers']] for qa in qas]
@@ -83,7 +90,9 @@ class QuACReader(DatasetReader):
                 yesno_list = [str(qa['yesno']) for qa in qas]
                 followup_list = [str(qa['followup']) for qa in qas]
                 instance = self.text_to_instance(question_text_list,
+                                                 question_pos_list,
                                                  paragraph,
+                                                 paragraph_pos,
                                                  span_starts_list,
                                                  span_ends_list,
                                                  tokenized_paragraph,
@@ -95,7 +104,9 @@ class QuACReader(DatasetReader):
     @overrides
     def text_to_instance(self,  # type: ignore
                          question_text_list: List[str],
+                         question_list_pos: List[List[str]],
                          passage_text: str,
+                         passage_pos: List[str],
                          start_span_list: List[List[int]] = None,
                          end_span_list: List[List[int]] = None,
                          passage_tokens: List[Token] = None,
@@ -126,7 +137,9 @@ class QuACReader(DatasetReader):
         additional_metadata['answer_texts_list'] = [util.handle_cannot(ans_list) for ans_list \
                                                     in additional_metadata['answer_texts_list']]
         return util.make_reading_comprehension_instance_quac(question_list_tokens,
+                                                             question_list_pos,
                                                              passage_tokens,
+                                                             passage_pos,
                                                              self._token_indexers,
                                                              passage_text,
                                                              answer_token_span_list,

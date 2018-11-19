@@ -27,14 +27,20 @@ class DialogQAPredictor(Predictor):
         """
         paragraph_json = json_dict[0]['paragraphs'][0]
         paragraph = paragraph_json['context']
+        paragraph_pos = paragraph_json['context_pos']
         tokenized_paragraph = self._tokenizer.split_words(paragraph)
         qas = paragraph_json['qas']
         metadata = {}
         metadata["instance_id"] = [qa['id'] for qa in qas]
         question_text_list = [qa["question"].strip().replace("\n", "") for qa in qas]
+        question_pos_list = [qa["question_pos"] for qa in qas]
         answer_texts_list = [[qa['answer']] for qa in qas]
+        answer_pos_list = [paragraph_pos[qa['answer_start']:qa['answer_start'] + len(qa['answer'])]
+                           for qa in qas]
         metadata["answer_texts_list"] = answer_texts_list
         metadata["question_tokens"] = [self._tokenizer.split_words(q) for q in question_text_list]
+        metadata["question_pos"] = question_pos_list
+        metadata["answer_pos"] = answer_pos_list
         metadata["passage_tokens"] = [tokenized_paragraph]
         metadata["predict"] = True
         span_starts_list = [[qa['answer_start']] for qa in qas]

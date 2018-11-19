@@ -90,6 +90,9 @@ class DialogQA(Model):
                                                            marker_embedding_dim)
             self._prev_ans_marker = torch.nn.Embedding((num_context_answers * 4) + 1, marker_embedding_dim)
 
+        pos_tags = self.vocab.get_vocab_size('pos_tags')
+        self._pos_emb = torch.nn.Embedding(pos_tags, marker_embedding_dim)
+
         self._self_attention = LinearMatrixAttention(self._encoding_dim, self._encoding_dim, 'x,y,x*y')
 
         self._followup_lin = torch.nn.Linear(self._encoding_dim, 3)
@@ -120,7 +123,9 @@ class DialogQA(Model):
 
     def forward(self,  # type: ignore
                 question: Dict[str, torch.LongTensor],
+                question_pos: Dict[str, torch.LongTensor],
                 answer: Dict[str, torch.LongTensor],
+                answer_pos: Dict[str, torch.LongTensor],
                 passage: Dict[str, torch.LongTensor],
                 span_start: torch.IntTensor = None,
                 span_end: torch.IntTensor = None,
@@ -201,12 +206,19 @@ class DialogQA(Model):
         embedded_question = embedded_question.reshape(total_qa_count, max_q_len,
                                                       self._text_field_embedder.get_output_dim())
         embedded_question = self._variational_dropout(embedded_question)
+        embedded_question_pos = self._pos_emb(question_pos)
+        embedded_question_pos = embedded_question_pos.reshape(total_qa_count, max_q_len,
+                                                      self._pos_emb.embedding_dim)
 
         # embed answer
         embedded_answer = self._text_field_embedder(answer, num_wrapping_dims=1)
         emb_sz = self._text_field_embedder.get_output_dim()
         embedded_answer = embedded_answer.reshape(total_qa_count, max_a_len, emb_sz)
         embedded_answer = self._variational_dropout(embedded_answer)
+
+        embedded_answer_pos = self._pos_emb(answer_pos)
+        embedded_answer_pos = embedded_answer_pos.reshape(total_qa_count, max_a_len,
+                                                  self._pos_emb.embedding_dim)
 
         # Get QA masks here
         question_mask = util.get_text_field_mask(question, num_wrapping_dims=1).float()
@@ -242,27 +254,44 @@ class DialogQA(Model):
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
 
         # Encode the previous answers in passage embedding.
-        past_questions, past_answers, past_question_masks, past_answer_masks, followup_masks = [], [], [], [], []
+        past_questions, past_questions_pos, past_answers, past_answers_pos, past_question_masks, past_answer_masks, followup_masks =\
+            [], [], [], [], [], [], []
         for i in range(self._ctx_q_encoder.num_turns):
             turn_ix = i + 1
-            past_question, past_question_mask, past_answer, past_answer_mask, followup_mask = get_masked_past_qa_pairs(
-                embedded_question, question_mask, embedded_answer, answer_mask,
-                followup_list, followup_yes_label, batch_size, max_qa_count, max_q_len, max_a_len, turn_ix
+            past_question, past_question_pos, past_question_mask, past_answer, past_answer_pos, past_answer_mask, followup_mask = get_masked_past_qa_pairs(
+                question=embedded_question,
+                question_pos=embedded_question_pos,
+                question_mask=question_mask,
+                answer=embedded_answer,
+                answer_pos=embedded_answer_pos,
+                answer_mask=answer_mask,
+                followup_list=followup_list,
+                followup_yes_label=followup_yes_label,
+                batch_size=batch_size,
+                max_qa_count=max_qa_count,
+                max_q_len=max_q_len,
+                max_a_len=max_a_len,
+                n=turn_ix
             )
             past_questions.append(past_question)
+            past_questions_pos.append(past_question_pos)
             past_answers.append(past_answer)
+            past_answers_pos.append(past_answer_pos)
             past_question_masks.append(past_question_mask)
             past_answer_masks.append(past_answer_mask)
             followup_masks.append(followup_mask)
 
-        ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as = \
-            self._ctx_q_encoder(embedded_question,
-                                past_questions,
-                                past_answers,
-                                past_question_masks,
-                                past_answer_masks,
-                                followup_masks,
-                                question_mask)
+        ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as, ant_scores = \
+            self._ctx_q_encoder.forward(embedded_question,
+                                        embedded_question_pos,
+                                        past_questions,
+                                        past_questions_pos,
+                                        past_answers,
+                                        past_answers_pos,
+                                        past_question_masks,
+                                        past_answer_masks,
+                                        followup_masks,
+                                        question_mask)
 
 
         question_num_ind = util.get_range_vector(max_qa_count, util.get_device_of(ref_embedded_question))
@@ -468,6 +497,7 @@ class DialogQA(Model):
             )
             output_dict['sm_att_qs'] = [sm_att_qs]
             output_dict['sm_att_as'] = [sm_att_as]
+            output_dict['ant_scores'] = [ant_scores]
         return output_dict
 
     @overrides

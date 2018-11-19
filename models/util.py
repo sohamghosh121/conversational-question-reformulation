@@ -219,7 +219,9 @@ def make_reading_comprehension_instance(question_tokens: List[Token],
 
 
 def make_reading_comprehension_instance_quac(question_list_tokens: List[List[Token]],
+                                             question_list_pos: List[List[str]],
                                              passage_tokens: List[Token],
+                                             passage_pos: List[str],
                                              token_indexers: Dict[str, TokenIndexer],
                                              passage_text: str,
                                              token_span_lists: List[List[Tuple[int, int]]] = None,
@@ -276,7 +278,13 @@ def make_reading_comprehension_instance_quac(question_list_tokens: List[List[Tok
     question = [TextField(q_tokens, token_indexers) for q_tokens in question_list_tokens]
     # prev_questions = [ListField(question[:i]) for i in range(len(question) - 1)]
 
-    fields['question'] = ListField(question)
+    try:
+        fields['question'] = ListField(question)
+        fields['question_pos'] = ListField([SequenceLabelField(q_pos, question[i], label_namespace="pos_tags")
+                                            for i, q_pos in enumerate(question_list_pos)])
+    except:
+        import pdb
+        pdb.set_trace()
     # fields['prev_questions'] = ListField(prev_questions)
 
     def answer_tokens(passage_tokens, span_start, span_end):
@@ -286,7 +294,10 @@ def make_reading_comprehension_instance_quac(question_list_tokens: List[List[Tok
 
     answer = [TextField(answer_tokens(passage_tokens, start, end), token_indexers)
                                   for (start, end) in last_ann]
+    answer_pos = [SequenceLabelField(answer_tokens(passage_pos, start, end), answer[i], label_namespace="pos_tags")
+                  for i, (start, end) in enumerate(last_ann)]
     fields['answer'] = ListField(answer)
+    fields['answer_pos'] = ListField(answer_pos)
 
     metadata = {'original_passage': passage_text,
                 'token_offsets': passage_offsets,
