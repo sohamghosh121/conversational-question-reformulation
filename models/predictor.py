@@ -51,7 +51,9 @@ class DialogQAPredictor(Predictor):
         yesno_list = [str(qa['yesno']) for qa in qas]
         followup_list = [str(qa['followup']) for qa in qas]
         instance = self._dataset_reader.text_to_instance(question_text_list,
+                                                         question_pos_list,
                                                          paragraph,
+                                                         paragraph_pos,
                                                          span_starts_list,
                                                          span_ends_list,
                                                          tokenized_paragraph,

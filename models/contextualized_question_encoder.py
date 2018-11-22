@@ -33,7 +33,7 @@ def get_masked_past_qa_pairs(question,
                              max_a_len,
                              n=1):
     emb_sz = question.size(-1)
-    pos_emb_sz = question_pos.size(-1)
+
 
     question_mask = question_mask.view(batch_size, max_qa_count, max_q_len)
     answer_mask = answer_mask.view(batch_size, max_qa_count, max_a_len)
@@ -64,13 +64,6 @@ def get_masked_past_qa_pairs(question,
     past_answer = is_followup_mask.unsqueeze(2).expand_as(past_answer) * past_answer
     past_answer = past_answer.view(total_qa_count, max_a_len, emb_sz)
 
-    past_answer_pos = answer_pos.view(batch_size, max_qa_count, max_a_len, pos_emb_sz)
-    past_answer_pos = F.pad(past_answer_pos, (0, 0, 0, 0, n, 0, 0, 0))
-    past_answer_pos = past_answer_pos[:, :-n, :]  # remove the last one
-    past_answer_pos = is_followup_mask.unsqueeze(2).expand_as(past_answer_pos) * past_answer_pos
-    past_answer_pos = past_answer_pos.view(total_qa_count, max_a_len, pos_emb_sz)
-
-
     past_question = question.view(batch_size, max_qa_count, max_q_len, emb_sz)
     past_question = F.pad(past_question, (0, 0, 0, 0, n, 0, 0, 0))
     past_question = past_question[:, :-n, :]
@@ -79,13 +72,24 @@ def get_masked_past_qa_pairs(question,
         past_question) * past_question
     past_question = past_question.view(total_qa_count, max_q_len, emb_sz)
 
-    past_question_pos = question_pos.view(batch_size, max_qa_count, max_q_len, pos_emb_sz)
-    past_question_pos = F.pad(past_question_pos, (0, 0, 0, 0, n, 0, 0, 0))
-    past_question_pos = past_question_pos[:, :-n, :]
-    # zero out turns which were not a followup
-    past_question_pos = is_followup_mask.unsqueeze(2).expand_as(
-        past_question_pos) * past_question_pos
-    past_question_pos = past_question_pos.view(total_qa_count, max_q_len, pos_emb_sz)
+    if question_pos is not None and answer_pos is not None:  # backward compatibility
+        pos_emb_sz = question_pos.size(-1)
+        past_answer_pos = answer_pos.view(batch_size, max_qa_count, max_a_len, pos_emb_sz)
+        past_answer_pos = F.pad(past_answer_pos, (0, 0, 0, 0, n, 0, 0, 0))
+        past_answer_pos = past_answer_pos[:, :-n, :]  # remove the last one
+        past_answer_pos = is_followup_mask.unsqueeze(2).expand_as(past_answer_pos) * past_answer_pos
+        past_answer_pos = past_answer_pos.view(total_qa_count, max_a_len, pos_emb_sz)
+
+        past_question_pos = question_pos.view(batch_size, max_qa_count, max_q_len, pos_emb_sz)
+        past_question_pos = F.pad(past_question_pos, (0, 0, 0, 0, n, 0, 0, 0))
+        past_question_pos = past_question_pos[:, :-n, :]
+        # zero out turns which were not a followup
+        past_question_pos = is_followup_mask.unsqueeze(2).expand_as(
+            past_question_pos) * past_question_pos
+        past_question_pos = past_question_pos.view(total_qa_count, max_q_len, pos_emb_sz)
+    else:
+        past_question_pos = None
+        past_answer_pos = None
 
 
     is_followup_mask = is_followup_mask.view(is_followup_mask.size(0) * is_followup_mask.size(1), 1)
@@ -132,8 +136,6 @@ def bidaf(curr_q: torch.Tensor,
         entropy - entropy of attention scores
     """
     # (B, N, M)
-    import pdb
-    pdb.set_trace()
     q_c_att = att(curr_q, past_ctx_enc)  # (B, M, N)
     if ant_scorer is not None:
         ant_scores = ant_scorer(past_ctx_enc)  # (B, N)
@@ -199,7 +201,7 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                 past_answers_pos,
                 past_q_masks,
                 past_ans_masks,
-                qa_masks,
+                qa_masks,  # this is basically followup mask
                 curr_q_mask):
         qq_hats, qa_hats, qq_entropies, qa_entropies, sm_att_as, sm_att_qs = [], [], [], [], [], []
         i = 1
@@ -286,12 +288,15 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
         q_final = torch.cat([curr_question, qq_hat, qa_hat], dim=2)
         q_final_enc = self.q_hat_enc(q_final)
 
+        has_a_followup = qa_masks[0]  # has at least one followup
         if self.antecedent_score is not None:
-            a_score = self.antecedent_score(curr_question_enc)
+            a_score = self.antecedent_score(curr_question_enc) * has_a_followup.unsqueeze(1)
             a_score = a_score.expand_as(q_final_enc)  # (B, 1)
             q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
         else:
-            a_score = None
+            a_score = has_a_followup
+            a_score = a_score.unsqueeze(1).expand_as(q_final_enc)  # (B, 1)
+            q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
 
         return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as, a_score
 

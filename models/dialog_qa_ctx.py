@@ -90,8 +90,9 @@ class DialogQA(Model):
                                                            marker_embedding_dim)
             self._prev_ans_marker = torch.nn.Embedding((num_context_answers * 4) + 1, marker_embedding_dim)
 
-        pos_tags = self.vocab.get_vocab_size('pos_tags')
-        self._pos_emb = torch.nn.Embedding(pos_tags, marker_embedding_dim)
+        if self._ctx_q_encoder.use_ling:
+            pos_tags = self.vocab.get_vocab_size('pos_tags')
+            self._pos_emb = torch.nn.Embedding(pos_tags, marker_embedding_dim)
 
         self._self_attention = LinearMatrixAttention(self._encoding_dim, self._encoding_dim, 'x,y,x*y')
 
@@ -123,16 +124,16 @@ class DialogQA(Model):
 
     def forward(self,  # type: ignore
                 question: Dict[str, torch.LongTensor],
-                question_pos: Dict[str, torch.LongTensor],
                 answer: Dict[str, torch.LongTensor],
-                answer_pos: Dict[str, torch.LongTensor],
                 passage: Dict[str, torch.LongTensor],
                 span_start: torch.IntTensor = None,
                 span_end: torch.IntTensor = None,
                 p_answer_marker: torch.IntTensor = None,
                 yesno_list: torch.IntTensor = None,
                 followup_list: torch.IntTensor = None,
-                metadata: List[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
+                metadata: List[Dict[str, Any]] = None,
+                answer_pos: Dict[str, torch.LongTensor] = None,
+                question_pos: Dict[str, torch.LongTensor] = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
         """
         Parameters
@@ -206,9 +207,6 @@ class DialogQA(Model):
         embedded_question = embedded_question.reshape(total_qa_count, max_q_len,
                                                       self._text_field_embedder.get_output_dim())
         embedded_question = self._variational_dropout(embedded_question)
-        embedded_question_pos = self._pos_emb(question_pos)
-        embedded_question_pos = embedded_question_pos.reshape(total_qa_count, max_q_len,
-                                                      self._pos_emb.embedding_dim)
 
         # embed answer
         embedded_answer = self._text_field_embedder(answer, num_wrapping_dims=1)
@@ -216,9 +214,17 @@ class DialogQA(Model):
         embedded_answer = embedded_answer.reshape(total_qa_count, max_a_len, emb_sz)
         embedded_answer = self._variational_dropout(embedded_answer)
 
-        embedded_answer_pos = self._pos_emb(answer_pos)
-        embedded_answer_pos = embedded_answer_pos.reshape(total_qa_count, max_a_len,
-                                                  self._pos_emb.embedding_dim)
+
+        if self._ctx_q_encoder.use_ling:
+            embedded_question_pos = self._pos_emb(question_pos)
+            embedded_question_pos = embedded_question_pos.reshape(total_qa_count, max_q_len,
+                                                          self._pos_emb.embedding_dim)
+            embedded_answer_pos = self._pos_emb(answer_pos)
+            embedded_answer_pos = embedded_answer_pos.reshape(total_qa_count, max_a_len,
+                                                      self._pos_emb.embedding_dim)
+        else:
+            embedded_question_pos = None
+            embedded_answer_pos = None
 
         # Get QA masks here
         question_mask = util.get_text_field_mask(question, num_wrapping_dims=1).float()

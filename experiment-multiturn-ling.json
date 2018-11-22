@@ -64,7 +64,7 @@
             "ling_features_size": 10,
             "combination": "entropy+exponential",
             "num_turns": 3,
-            "use_antecedent_score": true,
+            "use_antecedent_score": false,
             "use_mention_score": true
         },
         "phrase_layer": {
