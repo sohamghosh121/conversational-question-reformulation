@@ -76,9 +76,11 @@ class DialogQA(Model):
         self._phrase_layer = phrase_layer
         self._marker_embedding_dim = marker_embedding_dim
         self._encoding_dim = phrase_layer.get_output_dim()
-        self._ctx_q_encoder = ctx_q_encoder
+
         # combine memory with question
         max_turn_length = 12
+
+        self._ctx_q_encoder = ctx_q_encoder
 
         self._matrix_attention = LinearMatrixAttention(self._encoding_dim, self._encoding_dim, 'x,y,x*y')
         self._merge_atten = TimeDistributed(torch.nn.Linear(self._encoding_dim * 4, self._encoding_dim))
@@ -121,6 +123,13 @@ class DialogQA(Model):
         self._span_accuracy = BooleanAccuracy()
         self._official_f1 = Average()
         self._variational_dropout = InputVariationalDropout(dropout)
+
+    def train_base_qa(self):
+        self._train_coref_module = False
+
+    def train_coref_module(self):
+        self._train_coref_module = True
+
 
     def forward(self,  # type: ignore
                 question: Dict[str, torch.LongTensor],
@@ -287,7 +296,7 @@ class DialogQA(Model):
             past_answer_masks.append(past_answer_mask)
             followup_masks.append(followup_mask)
 
-        ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as, ant_scores = \
+        ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as, ant_scores, men_scores_a, men_scores_q = \
             self._ctx_q_encoder.forward(embedded_question,
                                         embedded_question_pos,
                                         past_questions,
@@ -305,7 +314,8 @@ class DialogQA(Model):
         question_num_ind = question_num_ind.unsqueeze(0).repeat(batch_size, 1, 1)
         question_num_ind = question_num_ind.reshape(total_qa_count, max_q_len)
         question_num_marker_emb = self._question_num_marker(question_num_ind)
-        embedded_question = torch.cat([embedded_question, question_num_marker_emb], dim=-1)
+
+        embedded_question = torch.cat([ref_embedded_question, question_num_marker_emb], dim=-1)
 
         p_answer_marker = p_answer_marker.view(total_qa_count, passage_length)
         p_answer_marker_emb = self._prev_ans_marker(p_answer_marker)
@@ -504,6 +514,8 @@ class DialogQA(Model):
             output_dict['sm_att_qs'] = [sm_att_qs]
             output_dict['sm_att_as'] = [sm_att_as]
             output_dict['ant_scores'] = [ant_scores]
+            output_dict['men_scores_a'] = [men_scores_a]
+            output_dict['men_scores_q'] = [men_scores_q]
         return output_dict
 
     @overrides

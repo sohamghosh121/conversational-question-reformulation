@@ -57,35 +57,34 @@ def get_masked_past_qa_pairs(question,
         is_followup_mask = is_followup_mask & is_followup_mask_  # has to be contiguous
     is_followup_mask = is_followup_mask.float()
 
-
     past_answer = answer.view(batch_size, max_qa_count, max_a_len, emb_sz)
     past_answer = F.pad(past_answer, (0, 0, 0, 0, n, 0, 0, 0))
-    past_answer = past_answer[:, :-n, :]  # remove the last one
-    past_answer = is_followup_mask.unsqueeze(2).expand_as(past_answer) * past_answer
+    past_answer = past_answer[:, :-n, :].contiguous()  # remove the last one
+    # past_answer = is_followup_mask.unsqueeze(2).expand_as(past_answer) * past_answer
     past_answer = past_answer.view(total_qa_count, max_a_len, emb_sz)
 
     past_question = question.view(batch_size, max_qa_count, max_q_len, emb_sz)
     past_question = F.pad(past_question, (0, 0, 0, 0, n, 0, 0, 0))
-    past_question = past_question[:, :-n, :]
+    past_question = past_question[:, :-n, :].contiguous()
     # zero out turns which were not a followup
-    past_question = is_followup_mask.unsqueeze(2).expand_as(
-        past_question) * past_question
+    # past_question = is_followup_mask.unsqueeze(2).expand_as(
+    #     past_question) * past_question
     past_question = past_question.view(total_qa_count, max_q_len, emb_sz)
 
     if question_pos is not None and answer_pos is not None:  # backward compatibility
         pos_emb_sz = question_pos.size(-1)
         past_answer_pos = answer_pos.view(batch_size, max_qa_count, max_a_len, pos_emb_sz)
         past_answer_pos = F.pad(past_answer_pos, (0, 0, 0, 0, n, 0, 0, 0))
-        past_answer_pos = past_answer_pos[:, :-n, :]  # remove the last one
-        past_answer_pos = is_followup_mask.unsqueeze(2).expand_as(past_answer_pos) * past_answer_pos
+        past_answer_pos = past_answer_pos[:, :-n, :].contiguous()  # remove the last one
+        # past_answer_pos = is_followup_mask.unsqueeze(2).expand_as(past_answer_pos) * past_answer_pos
         past_answer_pos = past_answer_pos.view(total_qa_count, max_a_len, pos_emb_sz)
 
         past_question_pos = question_pos.view(batch_size, max_qa_count, max_q_len, pos_emb_sz)
         past_question_pos = F.pad(past_question_pos, (0, 0, 0, 0, n, 0, 0, 0))
-        past_question_pos = past_question_pos[:, :-n, :]
+        past_question_pos = past_question_pos[:, :-n, :].contiguous()
         # zero out turns which were not a followup
-        past_question_pos = is_followup_mask.unsqueeze(2).expand_as(
-            past_question_pos) * past_question_pos
+        # past_question_pos = is_followup_mask.unsqueeze(2).expand_as(
+        #     past_question_pos) * past_question_pos
         past_question_pos = past_question_pos.view(total_qa_count, max_q_len, pos_emb_sz)
     else:
         past_question_pos = None
@@ -123,7 +122,7 @@ def bidaf(curr_q: torch.Tensor,
           past_ctx_emb: torch.Tensor,
           masks: torch.Tensor,
           att: MatrixAttention,
-          ant_scorer
+          men_scorer
           ):
     """
 
@@ -137,16 +136,18 @@ def bidaf(curr_q: torch.Tensor,
     """
     # (B, N, M)
     q_c_att = att(curr_q, past_ctx_enc)  # (B, M, N)
-    if ant_scorer is not None:
-        ant_scores = ant_scorer(past_ctx_enc)  # (B, N)
-        ant_scores_ex = ant_scores.squeeze(-1).unsqueeze(1).expand_as(q_c_att)
-        q_c_att = q_c_att + ant_scores_ex
+    if men_scorer is not None:
+        men_scores = men_scorer(past_ctx_enc)  # (B, N)
+        men_scores_ex = men_scores.squeeze(-1).unsqueeze(1).expand_as(q_c_att)
+        q_c_att = q_c_att + men_scores_ex
+    else:
+        men_scores = None
     sm_att = util.masked_softmax(q_c_att, masks)  # (B, M, N)
     log_sm_att = util.masked_log_softmax(q_c_att, masks) # (B, M, N)
     entropy = torch.sum(- sm_att * log_sm_att, 2)  # (B, M)
     # print(past_ctx_emb.size(), sm_att.size())
     q_hat = util.weighted_sum(past_ctx_emb, sm_att)  # (B, M)
-    return q_hat, entropy, sm_att
+    return q_hat, entropy, sm_att, men_scores
 
 class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
     def __init__(self,
@@ -203,7 +204,8 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                 past_ans_masks,
                 qa_masks,  # this is basically followup mask
                 curr_q_mask):
-        qq_hats, qa_hats, qq_entropies, qa_entropies, sm_att_as, sm_att_qs = [], [], [], [], [], []
+        qq_hats, qa_hats, qq_entropies, qa_entropies, sm_att_as, sm_att_qs, men_scores_a, men_scores_q = \
+            [], [], [], [], [], [], [], []
         i = 1
 
         curr_question_enc = self._coref_layer(curr_question, curr_q_mask)
@@ -222,13 +224,13 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
                 past_question_enc = self._coref_proj(torch.cat([past_question_enc, past_question_pos], -1))
                 past_answer_enc = self._coref_proj(torch.cat([past_answer_enc, past_answer_pos], -1))
 
-            qq_hat, qq_entropy, sm_att_q = bidaf(curr_question_enc,
+            qq_hat, qq_entropy, sm_att_q, men_score_q = bidaf(curr_question_enc,
                                                  past_question_enc,
                                                  past_question,
                                                  past_q_mask,
                                                  self.qq_attention,
                                                  self.mention_score)
-            qa_hat, qa_entropy, sm_att_a = bidaf(curr_question_enc,
+            qa_hat, qa_entropy, sm_att_a, men_score_a = bidaf(curr_question_enc,
                                                  past_answer_enc,
                                                  past_answer,
                                                  past_ans_mask,
@@ -241,6 +243,8 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
             qa_entropies.append(qa_entropy.unsqueeze(1))
             sm_att_qs.append(sm_att_q)
             sm_att_as.append(sm_att_a)
+            men_scores_q.append(men_score_q)
+            men_scores_a.append(men_score_a)
             i += 1
 
         # each qq_hat, qa_hat -> (B, N_QA, 1, M, EMB_SZ)
@@ -298,6 +302,6 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
             a_score = a_score.unsqueeze(1).expand_as(q_final_enc)  # (B, 1)
             q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
 
-        return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as, a_score
+        return q_final_enc, weights_qq, weights_qa, sm_att_qs, sm_att_as, a_score, men_scores_a, men_scores_q
 
 ContextualizedQuestionEncoder.register('biatt_ctx_multi')(BiAttContext_MultiTurn)
