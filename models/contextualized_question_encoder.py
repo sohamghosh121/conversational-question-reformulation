@@ -9,8 +9,6 @@ from allennlp.modules import TimeDistributed
 import numpy as np
 from torch.autograd import Variable
 
-from allennlp.modules.seq2seq_encoders import StackedBidirectionalLstm
-
 class ContextualizedQuestionEncoder(_EncoderBase, Registrable):
     pass
 

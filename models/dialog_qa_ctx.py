@@ -269,53 +269,53 @@ class DialogQA(Model):
         followup_yes_label = self.vocab.get_token_index('y', namespace='followup_labels')
 
         # Encode the previous answers in passage embedding.
-        past_questions, past_questions_pos, past_answers, past_answers_pos, past_question_masks, past_answer_masks, followup_masks =\
-            [], [], [], [], [], [], []
-        for i in range(self._ctx_q_encoder.num_turns):
-            turn_ix = i + 1
-            past_question, past_question_pos, past_question_mask, past_answer, past_answer_pos, past_answer_mask, followup_mask = get_masked_past_qa_pairs(
-                question=embedded_question,
-                question_pos=embedded_question_pos,
-                question_mask=question_mask,
-                answer=embedded_answer,
-                answer_pos=embedded_answer_pos,
-                answer_mask=answer_mask,
-                followup_list=followup_list,
-                followup_yes_label=followup_yes_label,
-                batch_size=batch_size,
-                max_qa_count=max_qa_count,
-                max_q_len=max_q_len,
-                max_a_len=max_a_len,
-                n=turn_ix
-            )
-            past_questions.append(past_question)
-            past_questions_pos.append(past_question_pos)
-            past_answers.append(past_answer)
-            past_answers_pos.append(past_answer_pos)
-            past_question_masks.append(past_question_mask)
-            past_answer_masks.append(past_answer_mask)
-            followup_masks.append(followup_mask)
+        if self._train_coref_module:
+            past_questions, past_questions_pos, past_answers, past_answers_pos, past_question_masks, past_answer_masks, followup_masks =\
+                [], [], [], [], [], [], []
+            for i in range(self._ctx_q_encoder.num_turns):
+                turn_ix = i + 1
+                past_question, past_question_pos, past_question_mask, past_answer, past_answer_pos, past_answer_mask, followup_mask = get_masked_past_qa_pairs(
+                    question=embedded_question,
+                    question_pos=embedded_question_pos,
+                    question_mask=question_mask,
+                    answer=embedded_answer,
+                    answer_pos=embedded_answer_pos,
+                    answer_mask=answer_mask,
+                    followup_list=followup_list,
+                    followup_yes_label=followup_yes_label,
+                    batch_size=batch_size,
+                    max_qa_count=max_qa_count,
+                    max_q_len=max_q_len,
+                    max_a_len=max_a_len,
+                    n=turn_ix
+                )
+                past_questions.append(past_question)
+                past_questions_pos.append(past_question_pos)
+                past_answers.append(past_answer)
+                past_answers_pos.append(past_answer_pos)
+                past_question_masks.append(past_question_mask)
+                past_answer_masks.append(past_answer_mask)
+                followup_masks.append(followup_mask)
 
-        ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as, ant_scores, men_scores_a, men_scores_q = \
-            self._ctx_q_encoder.forward(embedded_question,
-                                        embedded_question_pos,
-                                        past_questions,
-                                        past_questions_pos,
-                                        past_answers,
-                                        past_answers_pos,
-                                        past_question_masks,
-                                        past_answer_masks,
-                                        followup_masks,
-                                        question_mask)
+            ref_embedded_question, weights_qq, weights_qa, sm_att_qs, sm_att_as, ant_scores, men_scores_a, men_scores_q = \
+                self._ctx_q_encoder.forward(embedded_question,
+                                            embedded_question_pos,
+                                            past_questions,
+                                            past_questions_pos,
+                                            past_answers,
+                                            past_answers_pos,
+                                            past_question_masks,
+                                            past_answer_masks,
+                                            followup_masks,
+                                            question_mask)
 
-
-        question_num_ind = util.get_range_vector(max_qa_count, util.get_device_of(ref_embedded_question))
-        question_num_ind = question_num_ind.unsqueeze(-1).repeat(1, max_q_len)
-        question_num_ind = question_num_ind.unsqueeze(0).repeat(batch_size, 1, 1)
-        question_num_ind = question_num_ind.reshape(total_qa_count, max_q_len)
-        question_num_marker_emb = self._question_num_marker(question_num_ind)
-
-        embedded_question = torch.cat([ref_embedded_question, question_num_marker_emb], dim=-1)
+        else:
+            question_num_ind = util.get_range_vector(max_qa_count, util.get_device_of(embedded_question))
+            question_num_ind = question_num_ind.unsqueeze(-1).repeat(1, max_q_len)
+            question_num_ind = question_num_ind.unsqueeze(0).repeat(batch_size, 1, 1)
+            question_num_ind = question_num_ind.reshape(total_qa_count, max_q_len)
+            question_num_marker_emb = self._question_num_marker(question_num_ind)
+            embedded_question = torch.cat([embedded_question, question_num_marker_emb], dim=-1)
 
         p_answer_marker = p_answer_marker.view(total_qa_count, passage_length)
         p_answer_marker_emb = self._prev_ans_marker(p_answer_marker)
