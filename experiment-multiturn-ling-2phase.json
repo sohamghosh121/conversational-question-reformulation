@@ -132,11 +132,15 @@
             "mode": "max",
             "patience": 3
         },
-        "num_phase1_epochs": 0,
-        "num_phase2_epochs": 10,
+        "num_phase1_epochs": 1,
+        "num_phase2_epochs": 1,
         "phase1_optimizer": {
             "type": "adam",
-            "lr": 0.001
+            "lr": 0.001,
+            "parameter_groups": [
+                [["_ctx_q_encoder.*"], {"lr": 0.001}],
+                [["^((?!_ctx_q_encoder).)*$"], {"lr": 0.00001}]
+            ]
         },
         "phase2_optimizer": {
             "type": "adam",

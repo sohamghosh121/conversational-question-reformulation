@@ -77,6 +77,8 @@ class DialogQA(Model):
         self._marker_embedding_dim = marker_embedding_dim
         self._encoding_dim = phrase_layer.get_output_dim()
 
+        self._train_coref_module = True
+
         # combine memory with question
         max_turn_length = 12
 
@@ -308,7 +310,12 @@ class DialogQA(Model):
                                             past_answer_masks,
                                             followup_masks,
                                             question_mask)
-
+            question_num_ind = util.get_range_vector(max_qa_count, util.get_device_of(embedded_question))
+            question_num_ind = question_num_ind.unsqueeze(-1).repeat(1, max_q_len)
+            question_num_ind = question_num_ind.unsqueeze(0).repeat(batch_size, 1, 1)
+            question_num_ind = question_num_ind.reshape(total_qa_count, max_q_len)
+            question_num_marker_emb = self._question_num_marker(question_num_ind)
+            embedded_question = torch.cat([ref_embedded_question, question_num_marker_emb], dim=-1)
         else:
             question_num_ind = util.get_range_vector(max_qa_count, util.get_device_of(embedded_question))
             question_num_ind = question_num_ind.unsqueeze(-1).repeat(1, max_q_len)

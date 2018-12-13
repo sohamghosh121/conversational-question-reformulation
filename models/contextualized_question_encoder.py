@@ -172,7 +172,7 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
             self._coref_proj = TimeDistributed(torch.nn.Linear(coref_output_dim + ling_features_size, coref_output_dim))
 
         if use_mention_score:
-            self.mention_score = TimeDistributed(torch.nn.Linear(coref_output_dim, 1))
+            self.mention_score = TimeDistributed(torch.nn.Linear(coref_output_dim, 1, bias=False))
         else:
             self.mention_score = None
 
@@ -292,7 +292,9 @@ class BiAttContext_MultiTurn(ContextualizedQuestionEncoder):
 
         has_a_followup = qa_masks[0]  # has at least one followup
         if self.antecedent_score is not None:
-            a_score = self.antecedent_score(curr_question_enc) * has_a_followup.unsqueeze(1)
+            a_score = self.antecedent_score(curr_question_enc)
+            print(a_score)
+            a_score = a_score * has_a_followup.unsqueeze(1)
             a_score = a_score.expand_as(q_final_enc)  # (B, 1)
             q_final_enc = a_score * q_final_enc + (1 - a_score) * curr_question  # gated
         else:
